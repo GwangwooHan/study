@@ -8,3 +8,12 @@
 *.data-00000-of-00001
 *.index
 *.zip
+*.exe
+*.pyc
+*.dll
+*.bin
+*.h
+*.xml
+*.bat
+*.json
+*.tff

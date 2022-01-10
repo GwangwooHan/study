@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.distributions import Normal
 from tensorboardX import SummaryWriter
 
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 parser = argparse.ArgumentParser()
 
