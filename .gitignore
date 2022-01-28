@@ -17,3 +17,9 @@
 *.bat
 *.json
 *.tff
+More/
+baselines/
+gym/
+senv/
+share/
+data/
