@@ -1,6 +1,6 @@
 # Run this again after editing submodules so Colab uses the updated versions
 import os
-from citylearn import  CityLearn
+from citylearn import CityLearn
 from pathlib import Path
 from agent import Agent
 import numpy as np                                                
