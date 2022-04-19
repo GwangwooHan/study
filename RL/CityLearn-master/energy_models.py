@@ -700,7 +700,7 @@ class EnergyStorage:
         if self.capacity is not None:
             self._soc = min(self._soc, self.capacity)
           
-        # Calculating the energy balance with its external environmrnt (amount of energy taken from or relseased to the environment)
+        # Calculating the energy balance with itDs external environmrnt (amount of energy taken from or relseased to the environment)
         
         #Charging    
         if energy >= 0:
