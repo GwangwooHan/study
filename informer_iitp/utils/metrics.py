@@ -17,6 +17,9 @@ def MSE(pred, true):
 def RMSE(pred, true):
     return np.sqrt(MSE(pred, true))
 
+def Cv_RMSE(pred, true):
+    return np.sqrt(MSE(pred, true))/np.mean(true)*100
+
 def MAPE(pred, true):
     return np.mean(np.abs((pred - true) / true))
 
@@ -27,7 +30,8 @@ def metric(pred, true):
     mae = MAE(pred, true)
     mse = MSE(pred, true)
     rmse = RMSE(pred, true)
+    Cv_rmse = Cv_RMSE(pred, true)
     mape = MAPE(pred, true)
     mspe = MSPE(pred, true)
     
-    return mae,mse,rmse,mape,mspe
+    return mae,mse,Cv_rmse, rmse,mape,mspe
