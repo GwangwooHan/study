@@ -17,6 +17,8 @@
 *.bat
 *.json
 *.tff
+*.pth
+*.pt
 More/
 baselines/
 gym/
