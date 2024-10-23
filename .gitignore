@@ -19,6 +19,9 @@
 *.tff
 *.pth
 *.pt
+*.pdf
+*.npy
+
 More/
 baselines/
 gym/
