@@ -312,6 +312,350 @@ print(response.retriever_result.metadata['query_vector'])
 
 ---
 
+### Retriever 유형별 비교
+
+GraphRAG에서는 검색 방식에 따라 3가지 Retriever를 사용할 수 있습니다.
+
+| Retriever | 검색 방식 | 특징 | 적합한 경우 |
+|-----------|-----------|------|-------------|
+| **VectorRetriever** | 벡터 유사도 검색 | 의미 기반 검색 | 비정형 텍스트에서 유사 문서 찾기 |
+| **Text2CypherRetriever** | 자연어 → Cypher 변환 | LLM이 쿼리 생성 | 구조화된 데이터 질의 (집계, 필터링 등) |
+| **VectorCypherRetriever** | 벡터 검색 + 그래프 순회 | 두 방식 조합 | 유사 노드 찾고 관계 정보까지 수집 |
+
+> 각 Retriever의 상세 구현은 아래 섹션에서 설명합니다.
+
+---
+
+## Graph 기반 RAG 구현 (Text2Cypher)
+
+> 참고: `250113 06.Graph 기반 GraphRAG실습.ipynb`
+
+### 개념
+
+Text2Cypher는 **자연어 질문을 Cypher 쿼리로 자동 변환**하는 방식입니다.
+
+```
+사용자 질문 (자연어)
+        │
+        ▼ LLM + DB 스키마
+        │
+Cypher 쿼리 자동 생성
+        │
+        ▼ Neo4j 실행
+        │
+검색 결과 반환
+```
+
+### 스키마 추출 (get_schema 함수)
+
+LLM이 올바른 Cypher를 생성하려면 **DB 스키마 정보**가 필요합니다.
+
+```python
+from collections import defaultdict
+
+def get_schema():
+    schema = ""
+    with driver.session() as session:
+        # 모든 노드 라벨과 속성 추출
+        node_schema = session.run("""
+        CALL db.schema.nodeTypeProperties() YIELD nodeType, propertyName, propertyTypes
+        RETURN nodeType, propertyName, propertyTypes
+        """)
+
+        nodes = defaultdict(dict)
+        for record in node_schema:
+            label = record["nodeType"].replace(":", "")
+            prop = record["propertyName"]
+            types = record["propertyTypes"]
+            nodes[label][prop] = types[0] if types else "UNKNOWN"
+
+        # 모든 관계 타입과 속성 추출
+        rel_schema = session.run("""
+        CALL db.schema.relTypeProperties() YIELD relType, propertyName, propertyTypes
+        RETURN relType, propertyName, propertyTypes
+        """)
+
+        relationships = defaultdict(dict)
+        for record in rel_schema:
+            rel = record["relType"]
+            prop = record["propertyName"]
+            types = record["propertyTypes"]
+            relationships[rel][prop] = types[0] if types else "UNKNOWN"
+
+        # 관계 방향 및 타입 추출
+        rel_types = session.run("""
+        MATCH (a)-[r]->(b)
+        RETURN DISTINCT labels(a) AS from_labels, type(r) AS rel_type, labels(b) AS to_labels
+        """)
+
+        rel_directions = set()
+        for record in rel_types:
+            from_label = f":{record['from_labels'][0]}"
+            to_label = f":{record['to_labels'][0]}"
+            rel_type = record['rel_type']
+            rel_directions.add(f"({from_label})-[:{rel_type}]->({to_label})")
+
+    # 스키마 문자열 생성
+    schema += "\nNode properties:\n"
+    for label, props in nodes.items():
+        prop_str = ", ".join(f"{k}: {v}" for k, v in props.items())
+        schema += f"{label} {{{prop_str}}}\n"
+
+    schema += "\nRelationship properties:\n"
+    for rel, props in relationships.items():
+        prop_str = ", ".join(f"{k}: {v}" for k, v in props.items())
+        schema += f"{rel} {{{prop_str}}}\n"
+
+    schema += "\nThe relationships:\n"
+    for rel in sorted(rel_directions):
+        schema += f"{rel}\n"
+    return schema
+```
+
+#### 스키마 출력 예시
+
+```
+Node properties:
+Person {name: String, age: String}
+Crime {id: String, date: String, type: String}
+Location {address: String, postcode: String}
+
+Relationship properties:
+PARTY_TO {}
+OCCURRED_AT {}
+
+The relationships:
+(:Crime)-[:OCCURRED_AT]->(:Location)
+(:Person)-[:PARTY_TO]->(:Crime)
+```
+
+### Text2CypherRetriever 사용
+
+```python
+from neo4j_graphrag.retrievers import Text2CypherRetriever
+
+# Few-shot 예시로 쿼리 품질 향상
+examples = [
+    """
+    USER INPUT: Piccadilly에서 발생한 범죄 건수는?
+    QUERY: MATCH (c:Crime)-[:OCCURRED_AT]->(l:Location {address: 'Piccadilly'})
+    RETURN count(c) AS crime_count
+    """
+]
+
+retriever = Text2CypherRetriever(
+    driver=driver,
+    llm=llm,
+    neo4j_schema=get_schema(),
+    examples=examples  # Few-shot 프롬프트
+)
+
+result = retriever.search(query_text="현재 수사중인 범죄 건수가 많은 담당자는?")
+```
+
+### GraphRAG 파이프라인 연결
+
+```python
+from neo4j_graphrag.generation import GraphRAG
+
+graph_rag = GraphRAG(retriever, llm)
+
+response = graph_rag.search(
+    query_text="범죄자는 아니지만, 범죄자를 많이 알고 있는 사람은?",
+    return_context=True
+)
+
+print(response.answer)
+print(response.retriever_result.metadata["cypher"])  # 생성된 Cypher 확인
+```
+
+---
+
+## Vector+Graph RAG 구현
+
+> 참고: `250114 07.Vector+Graph RAG 기반 GraphRAG실습.ipynb`
+
+### 개념
+
+Vector+Graph RAG는 **벡터 검색으로 관련 노드를 찾고**, **그래프 순회로 추가 컨텍스트를 수집**하는 방식입니다.
+
+```
+사용자 질문
+        │
+        ▼ 임베딩 변환
+        │
+벡터 유사도 검색 (영화 줄거리로 영화 찾기)
+        │
+        ▼ 검색된 노드 기준
+        │
+그래프 순회 (배우, 감독, 장르 등 관계 정보 수집)
+        │
+        ▼
+검색 결과 반환
+```
+
+### 사전 준비: 임베딩 추가
+
+기존 노드에 임베딩이 없는 경우 추가합니다.
+
+```python
+from neo4j_graphrag.embeddings.sentence_transformers import SentenceTransformerEmbeddings
+
+embedder = SentenceTransformerEmbeddings(model="all-MiniLM-L6-v2")  # 384차원
+
+with driver.session() as session:
+    result = session.run(
+        "MATCH (m:Movie) WHERE m.plot IS NOT NULL RETURN elementId(m) AS id, m.plot AS plot"
+    )
+    records = result.data()
+
+    for record in records:
+        node_id = record["id"]
+        text = record["plot"]
+        vector = embedder.embed_query(text)
+
+        session.run("""
+        MATCH (m) WHERE elementId(m) = $id
+        SET m.embedding = $embedding
+        """, {"id": node_id, "embedding": vector})
+```
+
+### 사전 준비: 벡터 인덱스 생성
+
+```python
+from neo4j_graphrag.indexes import create_vector_index
+
+create_vector_index(
+    driver,
+    name="plotindex",
+    label="Movie",
+    embedding_property="embedding",
+    dimensions=384,
+    similarity_fn="cosine"
+)
+```
+
+### VectorCypherRetriever 사용
+
+```python
+from neo4j_graphrag.retrievers import VectorCypherRetriever
+
+# 검색된 노드 기준 그래프 순회 쿼리
+retrieval_query = """
+MATCH (actor:Actor)-[:ACTED_IN]->(node)
+RETURN
+    node.title AS movie_title,
+    node.plot AS movie_plot,
+    collect(actor.name) AS actors
+"""
+
+retriever = VectorCypherRetriever(
+    driver,
+    index_name="plotindex",
+    retrieval_query=retrieval_query,
+    embedder=embedder
+)
+
+result = retriever.search(
+    query_text="A movie about playing a board game in the jungle",
+    top_k=5
+)
+```
+
+### 한글 쿼리 주의사항
+
+`all-MiniLM-L6-v2` 모델은 **영어 중심**으로 학습되어 한글 검색 성능이 낮습니다.
+
+| 쿼리 | 예상 결과 |
+|------|-----------|
+| `"정글 보드게임 영화"` | ❌ 관련 없는 영화 반환 |
+| `"A jungle board game movie"` | ✅ Jumanji 반환 |
+
+**해결 방법**: GraphRAG 파이프라인에서 LLM이 한글을 이해하고 영어로 검색 후 한글로 응답합니다.
+
+---
+
+## GraphRAG Context 생성 과정
+
+GraphRAG 파이프라인에서 `{context}` 변수가 어떻게 생성되는지 설명합니다.
+
+### Context 생성 흐름
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  graph_rag.search(query_text="정글 보드게임 영화 배우?")      │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  1단계: Retriever 검색 (내부 자동 실행)                       │
+│  retriever.search(query_text="...")                         │
+│                                                             │
+│  결과: [{movie_title: "Jumanji", actors: ["Robin Williams"]}]│
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  2단계: Context 자동 생성                                    │
+│  검색 결과를 문자열로 변환                                    │
+│                                                             │
+│  context = "Movie: Jumanji\nActors: Robin Williams..."      │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  3단계: 템플릿에 변수 삽입                                    │
+│  Question: {query_text} → "정글 보드게임 영화 배우?"          │
+│  Context: {context} → "Movie: Jumanji\nActors: ..."         │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4단계: LLM 응답 생성                                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### RagTemplate 사용
+
+커스텀 프롬프트 템플릿을 정의할 수 있습니다.
+
+```python
+from neo4j_graphrag.generation import RagTemplate, GraphRAG
+
+prompt_template = RagTemplate(
+    template="""
+    You are a helpful movie assistant.
+
+    Use the context to include:
+    - the movie title
+    - a brief plot summary
+    - main actor(s)
+
+    Answer in Korean.
+
+    Question: {query_text}
+
+    Context: {context}
+
+    Answer:
+    """,
+    expected_inputs=["context", "query_text"]
+)
+
+graph_rag = GraphRAG(retriever, llm, prompt_template=prompt_template)
+```
+
+### RagTemplate 구조
+
+| 속성 | 설명 |
+|------|------|
+| `template` | 프롬프트 문자열 (`{context}`, `{query_text}` 포함) |
+| `expected_inputs` | 템플릿에서 사용할 변수 이름 목록 |
+
+> **핵심**: `{context}`는 사용자가 제공하지 않습니다. GraphRAG가 Retriever 검색 결과를 **자동으로 문자열 변환**하여 삽입합니다.
+
+---
+
 ## 전체 흐름 요약
 
 ### INDEXING (구축 단계)
@@ -435,6 +779,122 @@ await kg_builder.run_async(file_path="GraphRAG.pdf")
 
 ---
 
+## 핵심 코드 상세 설명
+
+### get_schema() 함수 분석
+
+#### 1. defaultdict 사용 이유
+
+```python
+from collections import defaultdict
+
+nodes = defaultdict(dict)
+```
+
+| 비교 | 일반 dict | defaultdict(dict) |
+|------|-----------|-------------------|
+| 없는 키 접근 | `KeyError` 발생 | 빈 딕셔너리 `{}` 자동 생성 |
+| 코드 | `if key not in d: d[key] = {}` 필요 | 바로 `d[key][prop] = value` 가능 |
+
+```python
+# defaultdict 없이
+nodes = {}
+if label not in nodes:
+    nodes[label] = {}
+nodes[label][prop] = types[0]
+
+# defaultdict 사용
+nodes = defaultdict(dict)
+nodes[label][prop] = types[0]  # 자동으로 nodes[label] = {} 생성
+```
+
+#### 2. 삼항 연산자 패턴
+
+```python
+nodes[label][prop] = types[0] if types else "UNKNOWN"
+```
+
+**구조**: `(참일 때 값) if (조건) else (거짓일 때 값)`
+
+```python
+# 풀어쓰면
+if types:  # types 리스트가 비어있지 않으면
+    nodes[label][prop] = types[0]  # 첫 번째 요소 사용
+else:
+    nodes[label][prop] = "UNKNOWN"  # 빈 리스트면 UNKNOWN
+```
+
+#### 3. 관계 방향 추출 코드
+
+```python
+rel_types = session.run("""
+MATCH (a)-[r]->(b)
+RETURN DISTINCT labels(a) AS from_labels, type(r) AS rel_type, labels(b) AS to_labels
+""")
+
+rel_directions = set()
+for record in rel_types:
+    from_label = f":{record['from_labels'][0]}"
+    to_label = f":{record['to_labels'][0]}"
+    rel_type = record['rel_type']
+    rel_directions.add(f"({from_label})-[:{rel_type}]->({to_label})")
+```
+
+| 코드 | 설명 |
+|------|------|
+| `MATCH (a)-[r]->(b)` | 모든 관계 패턴 찾기 |
+| `labels(a)` | 노드 a의 라벨 리스트 (예: `["Person"]`) |
+| `labels(a)[0]` | 첫 번째 라벨 (예: `"Person"`) |
+| `type(r)` | 관계 타입 (예: `"KNOWS"`) |
+| `set()` | 중복 자동 제거 |
+
+**결과 예시**: `"(:Person)-[:KNOWS]->(:Person)"`
+
+#### 4. 스키마 문자열 생성
+
+```python
+schema += f"{label} {{{prop_str}}}\n"
+```
+
+| 표현 | 의미 |
+|------|------|
+| `{변수}` | 변수 값 삽입 |
+| `{{` | 실제 `{` 문자 출력 |
+| `}}` | 실제 `}` 문자 출력 |
+
+```python
+label = "Person"
+prop_str = "name: String, age: Integer"
+
+f"{label} {{{prop_str}}}"
+# 결과: "Person {name: String, age: Integer}"
+```
+
+#### 5. .items()와 .join() 메서드
+
+```python
+for label, props in nodes.items():
+    prop_str = ", ".join(f"{k}: {v}" for k, v in props.items())
+```
+
+| 메서드 | 설명 | 예시 |
+|--------|------|------|
+| `dict.items()` | (키, 값) 쌍의 리스트 반환 | `{"a": 1, "b": 2}.items()` → `[("a", 1), ("b", 2)]` |
+| `", ".join(list)` | 리스트를 쉼표로 연결 | `", ".join(["a", "b"])` → `"a, b"` |
+
+```python
+props = {"name": "String", "age": "Integer"}
+props.items()  # [("name", "String"), ("age", "Integer")]
+
+# 제너레이터 표현식
+f"{k}: {v}" for k, v in props.items()  # "name: String", "age: Integer"
+
+# join으로 연결
+", ".join(...)  # "name: String, age: Integer"
+```
+
+---
+
 ## 용어 정리표
 
 | 영어 용어 | 한글 용어 | 설명 |
@@ -448,3 +908,83 @@ await kg_builder.run_async(file_path="GraphRAG.pdf")
 | **Retriever** | 검색기 | 관련 문서를 찾는 컴포넌트 |
 | **RAG** | 검색 증강 생성 | Retrieval-Augmented Generation |
 | **GraphRAG** | 그래프 RAG | 그래프 구조를 활용한 RAG |
+| **Text2Cypher** | 텍스트→사이퍼 | 자연어를 Cypher 쿼리로 변환 |
+| **VectorCypherRetriever** | 벡터사이퍼검색기 | 벡터 검색 + 그래프 순회 조합 검색기 |
+| **RagTemplate** | RAG 템플릿 | GraphRAG 프롬프트 템플릿 정의 클래스 |
+| **Schema** | 스키마 | DB의 구조 정보 (노드, 관계, 속성) |
+| **Sandbox** | 샌드박스 | 무료 클라우드 테스트 환경 |
+| **Context** | 컨텍스트 | LLM에게 제공되는 검색 결과 문자열 |
+
+---
+
+## Neo4j 샌드박스 가이드
+
+### 샌드박스란?
+
+**샌드박스(Sandbox) = 무료 클라우드 테스트 환경**
+
+| 특징 | 설명 |
+|------|------|
+| **무료** | 비용 없이 사용 가능 |
+| **기간** | 3일간 유효 (연장 가능) |
+| **설치 불필요** | 클라우드에서 실행, 인터넷만 있으면 접속 |
+| **샘플 데이터** | Recommendations 등 데이터셋 미리 로드 가능 |
+
+### 샌드박스 생성 방법
+
+1. https://sandbox.neo4j.com 접속
+2. 회원가입 / 로그인 (Google 계정 가능)
+3. **"Create Sandbox"** 클릭
+4. 원하는 데이터셋 선택 (예: **Recommendations**)
+5. 생성 완료 후 연결 정보 확인
+
+### 연결 정보 확인
+
+**"Connection details"** 탭에서 확인:
+
+| 항목 | 예시 |
+|------|------|
+| **Bolt URL** | `bolt://54.209.48.102:7687` |
+| **Username** | `neo4j` |
+| **Password** | `baby-grain-challenge` (자동 생성) |
+
+### Python 연결 코드
+
+```python
+from neo4j import GraphDatabase, basic_auth
+
+driver = GraphDatabase.driver(
+    "neo4j://[IP주소]:7687",
+    auth=basic_auth("neo4j", "[비밀번호]")
+)
+
+# 연결 테스트
+with driver.session() as session:
+    result = session.run("RETURN 1 AS test")
+    print(result.single()["test"])  # 1 출력되면 성공
+```
+
+### 개인 샌드박스 vs 공유 서버
+
+| 항목 | 개인 샌드박스 | 공유 서버 |
+|------|---------------|-----------|
+| **소유권** | 본인 계정에 귀속 | 여러 사용자 공용 |
+| **데이터 격리** | 다른 사람 영향 없음 | 데이터 충돌 가능 |
+| **수정/삭제** | 자유롭게 가능 | 다른 사람 데이터 영향 |
+
+> **참고**: Neo4j Sandbox에서 생성하면 **개인 전용** 샌드박스입니다. "Connect via drivers"에 표시되는 연결 정보는 본인 샌드박스 정보입니다.
+
+### 임베딩/인덱스 확인 쿼리
+
+```cypher
+-- 임베딩이 있는 노드 수 확인
+MATCH (m:Movie) WHERE m.embedding IS NOT NULL
+RETURN count(m) AS count
+
+-- 벡터 인덱스 확인
+SHOW INDEXES
+
+-- 특정 인덱스 상세 확인
+SHOW INDEXES YIELD name, type, state, populationPercent
+WHERE name = 'plotindex'
+```
