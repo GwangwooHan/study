@@ -7,6 +7,176 @@
 
 # Chapter 02. LangGraph 핵심 개념
 
+## 01. LangChain vs LangGraph 구별법
+
+### 두 라이브러리의 관계
+
+| 라이브러리 | 역할 | 비유 |
+|-----------|------|------|
+| **LangChain** | LLM 호출, 프롬프트, 체인 구성 | 개별 작업 도구 |
+| **LangGraph** | 복잡한 워크플로우, 상태 관리, 분기/반복 | 작업 흐름 설계도 |
+
+> LangGraph는 LangChain 위에서 동작합니다. LangChain의 LLM, 프롬프트 등을 LangGraph의 노드 안에서 사용합니다.
+
+### LangChain 특징 및 장/단점
+
+**특징:**
+- LLM과의 상호작용을 단순화하는 **추상화 레이어**
+- 프롬프트 템플릿, 출력 파서, 메모리 등 **모듈화된 컴포넌트** 제공
+- `|` (파이프) 연산자로 컴포넌트를 **선형적으로 연결**
+- 다양한 LLM 프로바이더 지원 (OpenAI, Anthropic, HuggingFace 등)
+
+**장점:**
+| 장점 | 설명 |
+|------|------|
+| **빠른 프로토타이핑** | 몇 줄의 코드로 LLM 앱 구현 가능 |
+| **풍부한 통합** | 벡터DB, 문서 로더, 임베딩 등 다양한 도구 지원 |
+| **직관적인 문법** | `prompt | llm | parser` 형태로 읽기 쉬움 |
+| **커뮤니티 생태계** | 방대한 문서, 예제, 서드파티 통합 |
+
+**단점:**
+| 단점 | 설명 |
+|------|------|
+| **선형 흐름 한계** | 복잡한 분기/반복 로직 구현이 어려움 |
+| **상태 관리 부재** | 체인 간 상태 공유/추적이 제한적 |
+| **디버깅 어려움** | 체인이 길어지면 중간 상태 파악이 힘듦 |
+| **과도한 추상화** | 단순한 작업에도 불필요한 복잡성 추가 가능 |
+
+### LangGraph 특징 및 장/단점
+
+**특징:**
+- **그래프 기반** 워크플로우 설계 (노드 + 엣지)
+- **명시적 상태 관리** (TypedDict + Reducer)
+- **조건부 분기와 반복** 지원
+- **체크포인트/메모리** 내장으로 대화 지속성 제공
+- Human-in-the-loop 패턴 지원
+
+**장점:**
+| 장점 | 설명 |
+|------|------|
+| **복잡한 흐름 제어** | 분기, 반복, 병렬 실행 등 자유로운 워크플로우 |
+| **상태 추적 용이** | State가 명시적이라 디버깅/모니터링 편리 |
+| **재사용성** | 노드를 독립적으로 테스트하고 조합 가능 |
+| **장기 실행 지원** | 체크포인트로 중단/재개 가능 |
+| **시각화** | 그래프 구조를 Mermaid 다이어그램으로 확인 |
+
+**단점:**
+| 단점 | 설명 |
+|------|------|
+| **학습 곡선** | State, Reducer, Edge 개념 이해 필요 |
+| **보일러플레이트** | 단순 작업에도 State 정의, 노드 등록 필요 |
+| **설정 복잡도** | 간단한 체인보다 초기 설정 코드가 많음 |
+| **오버엔지니어링 위험** | 단순한 문제에 과도한 구조 적용 가능성 |
+
+### 언제 무엇을 사용할까?
+
+| 상황 | 권장 | 이유 |
+|------|------|------|
+| 단순 질의응답 | LangChain | 파이프 체인으로 충분 |
+| RAG 기본 구현 | LangChain | 문서 로더 + 벡터DB 통합 용이 |
+| 조건부 분기 필요 | **LangGraph** | 조건부 엣지로 명확한 흐름 제어 |
+| 반복 로직 필요 | **LangGraph** | 루프백 엣지로 반복 구현 |
+| Multi-Agent 시스템 | **LangGraph** | 에이전트 간 상태 공유/조정 |
+| 장기 실행 작업 | **LangGraph** | 체크포인트로 중단/재개 |
+| Human-in-the-loop | **LangGraph** | 사용자 승인 노드 삽입 용이 |
+| 빠른 프로토타입 | LangChain | 최소한의 코드로 검증 |
+
+**핵심 원칙:**
+> 단순하게 시작하고, 복잡해지면 전환하라
+> - **LangChain**으로 시작: 빠른 검증
+> - **LangGraph**로 전환: 분기/반복/상태 관리가 필요해질 때
+
+### 빠른 구별법: import 문 확인
+
+```python
+# LangChain만 사용
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+# LangGraph 사용 시 추가됨
+from langgraph.graph import StateGraph  # ← 이게 있으면 LangGraph
+```
+
+### 코드 패턴 비교
+
+| 구분 | LangChain | LangGraph |
+|------|-----------|-----------|
+| **import** | `from langchain_*` | `from langgraph.*` |
+| **핵심 클래스** | `ChatPromptTemplate`, `LLMChain` | `StateGraph`, `MessageGraph` |
+| **연결 방식** | `|` (파이프) | `.add_node()`, `.add_edge()` |
+| **State 관리** | 없거나 단순 dict | `TypedDict` + `Annotated` |
+| **실행** | `chain.invoke()` | `graph.compile().invoke()` |
+
+### 코드 예시 비교
+
+**LangChain 패턴:**
+```python
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+prompt = ChatPromptTemplate.from_messages([...])
+llm = ChatOpenAI(model="gpt-4o")
+
+chain = prompt | llm  # 파이프로 연결
+result = chain.invoke({"question": "..."})
+```
+
+**LangGraph 패턴:**
+```python
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+
+class State(TypedDict):
+    question: str
+    answer: str
+
+graph = StateGraph(State)
+graph.add_node("process", process_function)
+graph.add_edge(START, "process")
+graph.add_edge("process", END)
+
+app = graph.compile()
+result = app.invoke({"question": "..."})
+```
+
+### 키워드로 빠르게 파악하기
+
+| 키워드 | 의미 |
+|--------|------|
+| `StateGraph` | LangGraph |
+| `add_node`, `add_edge` | LangGraph |
+| `compile()` | LangGraph |
+| `TypedDict` + `Annotated[..., add]` | LangGraph State 패턴 |
+| `|` (파이프 연산자) | LangChain 체인 |
+| `ChatPromptTemplate` | LangChain (LangGraph에서도 사용) |
+
+### 혼합 사용 패턴
+
+실제 프로젝트에서는 **둘을 함께 사용**합니다:
+
+```python
+# LangChain: 프롬프트와 LLM 정의
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+prompt = ChatPromptTemplate.from_messages([...])
+llm = ChatOpenAI(model="gpt-4o")
+chain = prompt | llm  # LangChain 체인
+
+# LangGraph: 워크플로우 정의
+from langgraph.graph import StateGraph
+
+def my_node(state):
+    # 노드 안에서 LangChain 체인 사용
+    result = chain.invoke({"question": state["question"]})
+    return {"answer": result.content}
+
+graph = StateGraph(State)
+graph.add_node("process", my_node)  # LangChain 체인을 LangGraph 노드에서 실행
+```
+
+---
+
 ## 02. LangGraph 필수 구성요소
 
 LangGraph는 **3가지 핵심 요소**로 구성됩니다:

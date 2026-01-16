@@ -429,6 +429,127 @@ The relationships:
 (:Person)-[:PARTY_TO]->(:Crime)
 ```
 
+#### 관계 방향 추출 상세 설명
+
+**Cypher 쿼리 분석:**
+
+```cypher
+MATCH (a)-[r]->(b)
+RETURN DISTINCT labels(a) AS from_labels, type(r) AS rel_type, labels(b) AS to_labels
+```
+
+| 구성요소 | 역할 | 예시 결과 |
+|----------|------|-----------|
+| `(a)` | 시작 노드 | Person 노드 |
+| `-[r]->` | 방향이 있는 관계 (r은 관계 변수) | ACTED_IN |
+| `(b)` | 끝 노드 | Movie 노드 |
+| `labels(a)` | a 노드의 모든 라벨을 리스트로 반환 | `["Actor", "Person"]` |
+| `type(r)` | 관계 r의 타입 문자열 반환 | `"ACTED_IN"` |
+| `DISTINCT` | 중복 제거 (같은 패턴 한 번만) | - |
+
+**실제 데이터 흐름 예시:**
+
+```
+Neo4j 그래프:
+  (Tom Hanks:Actor:Person)-[:ACTED_IN]->(Forrest Gump:Movie)
+  (Tom Hanks:Actor:Person)-[:ACTED_IN]->(Cast Away:Movie)
+  (Steven Spielberg:Director)-[:DIRECTED]->(Jurassic Park:Movie)
+
+쿼리 실행 결과:
+┌─────────────────────┬────────────┬─────────────┐
+│ from_labels         │ rel_type   │ to_labels   │
+├─────────────────────┼────────────┼─────────────┤
+│ ["Actor", "Person"] │ "ACTED_IN" │ ["Movie"]   │
+│ ["Director"]        │ "DIRECTED" │ ["Movie"]   │
+└─────────────────────┴────────────┴─────────────┘
+```
+
+**Python 코드 단계별 실행:**
+
+```python
+# 1단계: 쿼리 실행 후 첫 번째 레코드 처리
+record = {"from_labels": ["Actor", "Person"], "rel_type": "ACTED_IN", "to_labels": ["Movie"]}
+
+# 2단계: 라벨 추출 ([0]으로 첫 번째만)
+from_label = f":{record['from_labels'][0]}"  # ":Actor"
+to_label = f":{record['to_labels'][0]}"      # ":Movie"
+rel_type = record['rel_type']                 # "ACTED_IN"
+
+# 3단계: f-string 조립
+result = f"({from_label})-[:{rel_type}]->({to_label})"
+# 조립 과정:
+#   f"({from_label})"       → "(:Actor)"
+#   f"-[:{rel_type}]->"     → "-[:ACTED_IN]->"
+#   f"({to_label})"         → "(:Movie)"
+# 최종 결과: "(:Actor)-[:ACTED_IN]->(:Movie)"
+
+# 4단계: set에 추가 (중복 자동 제거)
+rel_directions.add("(:Actor)-[:ACTED_IN]->(:Movie)")
+```
+
+**최종 결과물:**
+
+```python
+rel_directions = {
+    "(:Actor)-[:ACTED_IN]->(:Movie)",
+    "(:Director)-[:DIRECTED]->(:Movie)"
+}
+```
+
+#### 다중 라벨 노드 (Multi-Label Nodes)
+
+Neo4j에서 하나의 노드가 **여러 라벨을 동시에** 가질 수 있습니다.
+
+**예시: 영화 배우 겸 감독**
+
+```
+Tom Hanks 노드:
+  - 라벨: Actor, Director, Person (3개)
+  - 속성: name="Tom Hanks", born=1956
+```
+
+`labels()` 함수는 노드의 **모든 라벨을 리스트로** 반환합니다:
+
+```cypher
+MATCH (n:Person) WHERE n.name = "Tom Hanks"
+RETURN labels(n)
+-- 결과: ["Actor", "Director", "Person"]
+```
+
+**get_schema() 출력에서의 표현:**
+
+```
+노드 스키마:
+`Actor` {name: String, born: Integer}
+`Director` {name: String, born: Integer}
+`Person` {name: String, born: Integer}
+```
+
+> 같은 노드라도 라벨별로 별도 항목으로 표시됩니다.
+
+| 상황 | labels() 결과 | [0] 사용 시 |
+|------|---------------|-------------|
+| 단일 라벨 노드 | `["Movie"]` | `"Movie"` |
+| 다중 라벨 노드 | `["Actor", "Director", "Person"]` | `"Actor"` (첫 번째만) |
+
+**주의사항:**
+- `[0]`을 사용하면 첫 번째 라벨만 추출됩니다
+- 다중 라벨의 모든 정보를 보려면 `labels()` 전체를 사용해야 합니다
+- 라벨 순서는 Neo4j 내부 정렬에 따르며, 생성 순서와 다를 수 있습니다
+
+**다중 라벨 노드 활용 예시:**
+
+```cypher
+-- Actor이면서 Director인 노드 찾기
+MATCH (n:Actor:Director)
+RETURN n.name
+
+-- 또는
+MATCH (n)
+WHERE "Actor" IN labels(n) AND "Director" IN labels(n)
+RETURN n.name
+```
+
 ### Text2CypherRetriever 사용
 
 ```python
